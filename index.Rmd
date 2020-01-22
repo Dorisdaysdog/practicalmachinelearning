@@ -1,0 +1,107 @@
+---
+title: "weightlifting ML course PJ"
+author: "Mark P"
+date: "20/01/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(caret)
+library(dplyr)
+
+```
+
+## Introduction
+
+Using the HAR dataset on weightlifting movements the aim of this analysis is to predict the manner in which the subjects did the exercise. 
+In this document I will: 
+* describe how I built my model, 
+* how I used cross validation, 
+* what I think the expected out of sample error is, 
+* and why I made the choices I did. 
+
+
+
+```{r data}
+training<-read.csv('https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv')
+testing<-read.csv('https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv')
+# str(training)
+# summary(training)
+# both used to explore the data but the output is huge so not included in the html submission.
+```
+
+## Exploratory analysis
+
+The data is in a number of small timeseries for each user, for example Carlitos has a series of 24 rows in one window (18) until New window becomes yes. 
+
+Many of the variables are largely empty.  All the variables whose names contain skew or kurtosis are only present when the New Window variable=yes.  
+
+I read online that using the CARET::train with randomforest atuomatically does a 5 fold cross validation so I did not split my data into a train and a validation set and that it will calculate the out of bag error.
+
+```{r parallelise, echo=TRUE}
+
+library(parallel)
+library(doParallel)
+cluster <- makeCluster(detectCores() - 1) # convention to leave 1 core for OS
+registerDoParallel(cluster)
+fitControl <- trainControl(method = "cv",
+                           number = 5,
+                           allowParallel = TRUE)
+
+```
+
+# Model building and selection
+
+The next step was to try some simple models - I first did the following randomforest on all the training data
+> fit <- train(x,y, method="rf",data=training,trControl = fitControl)
+
+This failed and I assume that was due to the large number of missing values and very empty columns which I then started to exclude from the training data and just used the new_window rows (my thinking was that perhaps the skew and kurtosis measures captured the essential features of the time series
+
+```{r cleandata, echo=TRUE}
+
+
+trainNEW<-subset(training, new_window=="yes")
+
+```
+
+I then trained a model on this data 
+
+modSmall <- caret::train(classe ~ ., method="rf",data=trainNEW,verbose=FALSE,trControl = fitControl)
+
+but whilst this model which just takes the new window values gave accuracy of 0.9966667 with mtry=6939
+its important to note that the testing data is not like this (it is new_window=n) so can't be used to predict.  
+
+# Final selection of data
+
+That conclusion led me to the realisation that the testing data was almost 2/3s empty variables so only worth training on columns which are present in the testing data.  However when trying to predict on the test data this message comes: "variables in the training data missing in newdata".  modSmall$coefnames shows that there are 81 coefs and some of them are taken from factors such as "user_namecarlitos" and "cvtd_timestamp02/12/2011 13:33"  - the latter is a 20-level factor. I then tried excluding the 3 factor variables of user name, cvtd_timestamp and new_window and some variables which physically don't seem likley to have much correlation - "new_window","X","raw_timestamp_part_1","raw_timestamp_part_2", "num_window".
+
+```{r useTestOnly, echo=TRUE, cache=TRUE}
+not_emptyCol <- function(x) all(class(x)!="logical")
+
+testNEW<-select_if(testing, not_emptyCol)
+a<-names(testNEW)
+a<-a[1:59]
+names(testNEW)[60]<-"classe"
+trainNEW<-select(training,c(a,"classe"))
+trainNEW2<-select(trainNEW,-c("user_name","cvtd_timestamp","new_window","X","raw_timestamp_part_1","raw_timestamp_part_2", "num_window"))
+testNEW2<-select(testNEW,-c("user_name","cvtd_timestamp","new_window","X","raw_timestamp_part_1","raw_timestamp_part_2", "num_window"))
+
+modSmall <- caret::train(classe ~ ., method="rf",data=trainNEW2,verbose=FALSE,trControl = fitControl)
+modSmall
+
+
+stopCluster(cluster)
+registerDoSEQ()
+```
+
+As a side note using Doparellel used the 4 cores of my macbook pro and meant the training took 6:15 mins.  Many thanks to the legendy Len Greski at https://github.com/lgreski/datasciencectacontent/blob/master/markdown/pml-randomForestPerformance.md
+
+
+This gave a OOB estimate of  error rate: 0.4% and an optimal model of:
+mtry  Accuracy   Kappa    
+   2    0.9949548  0.9936178
+
+I then ran the following code:
+predict(modSmall$finalModel,testNEW2)
+ to get the predictions for the quiz.
